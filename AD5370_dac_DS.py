@@ -44,6 +44,16 @@ class AD5370DacDS(PyTango.Device_4Impl):
     # ------------------------------------------------------------------
     def __init__(self, cl, name):
         PyTango.Device_4Impl.__init__(self, cl, name)
+
+        self.stream_lock = None
+        self.attr_lock = None
+        self.apply_immediate = None
+        self.state_thread = None
+        self.command_queue = None
+        self.state_handler_dict = None
+        self.stop_state_thread_flag = None
+        self.AD5370_dac_device = None
+
         AD5370DacDS.init_device(self)
 
     # ------------------------------------------------------------------
@@ -79,6 +89,32 @@ class AD5370DacDS(PyTango.Device_4Impl):
         threading.Thread.__init__(self.state_thread, target=self.state_handler_dispatcher)
 
         self.command_queue = Queue.Queue(100)
+
+        try:
+            # Add channel attributes if not already defined
+            attrs = self.get_device_attr()
+            for ch in range(40):
+                try:
+                    attrs.get_attr_by_name(''.join(('channel', str(ch))))
+                    self.info_stream(''.join(('Channel ', str(ch), ' already defined.')))
+                except PyTango.DevFailed:
+                    # The attribute was not defined, so add it
+                    self.info_stream(''.join(('Channel ', str(ch), ' not defined, adding attribute.')))
+                    attr_info = [[PyTango.DevDouble, PyTango.SCALAR, PyTango.READ_WRITE],
+                                 {
+                                     'description': "DAC output for channel",
+                                     'unit': 'V',
+                                     'Memorized': "true",
+                                 }]
+                    attr_name = ''.join(('channel', str(ch)))
+                    attr_data = PyTango.AttrData(attr_name, self.get_name(), attr_info)
+                    self.add_attribute(attr_data, r_meth=self.read_channel, w_meth=self.write_channel,
+                                       is_allo_meth=self.is_channel_allowed)
+
+        except Exception, ex:
+            with self.stream_lock:
+                self.error_stream('Error when initializing device')
+                self.error_stream(str(ex))
 
         self.state_handler_dict = {PyTango.DevState.ON: self.on_handler,
                                    PyTango.DevState.MOVING: self.on_handler,
@@ -138,17 +174,16 @@ class AD5370DacDS(PyTango.Device_4Impl):
                 with self.stream_lock:
                     self.error_stream(str(ex))
                 self.set_status('Could not connect to AD5370_dac')
-                self.check_commands(block_time=connection_timeout)
                 continue
             self.set_state(PyTango.DevState.INIT)
             break
 
     def init_handler(self, prev_state):
-        """Handles the INIT state. Query Halcyon device to see if it is alive.
+        """Handles the INIT state. Query AD5370 device to see if it is alive.
         """
         with self.stream_lock:
             self.info_stream('Entering initHandler')
-        wait_time = 1.0
+        wait_time = 0.1
         self.set_status('Initializing device')
         retries = 0
         max_tries = 5
@@ -158,36 +193,13 @@ class AD5370DacDS(PyTango.Device_4Impl):
             if retries > max_tries:
                 self.set_state(PyTango.DevState.UNKNOWN)
                 break
-            try:
-                # Add channel attributes if not already defined
-                attrs = self.get_device_attr()
-                for ch in range(40):
-                    try:
-                        attrs.get_attr_by_name(''.join(('channel', str(ch))))
-                        self.info_stream(''.join(('Channel ', str(ch), ' already defined.')))
-                    except PyTango.DevFailed:
-                        # The attribute was not defined, so add it
-                        self.info_stream(''.join(('Channel ', str(ch), ' not defined, adding attribute.')))
-                        attr_info = [[PyTango.DevDouble, PyTango.SCALAR, PyTango.READ_WRITE],
-                                     {
-                                         'description': "DAC output for channel",
-                                         'unit': 'V',
-                                         'Memorized': "true",
-                                     }]
-                        attr_name = ''.join(('channel', str(ch)))
-                        attr_data = PyTango.AttrData(attr_name, self.get_name(), attr_info)
-                        self.add_attribute(attr_data, r_meth=self.read_channel, w_meth=self.write_channel,
-                                           is_allo_meth=self.is_channel_allowed)
 
-            except Exception, ex:
-                with self.stream_lock:
-                    self.error_stream(''.join(('Error when initializing device')))
-                    self.error_stream(str(ex))
-                self.check_commands(block_time=wait_time)
-                continue
-
-            self.set_state(PyTango.DevState.ON)
-            break
+            self.check_commands(block_time=wait_time)
+            if self.command_queue.empty:
+                self.set_state(PyTango.DevState.ON)
+                break
+            else:
+                retries -= 1
 
     def on_handler(self, prev_state):
         """Handles the ON state. Connected to the AD5370_dac.
@@ -305,6 +317,8 @@ class AD5370DacDS(PyTango.Device_4Impl):
             elif cmd.command == 'write_channel':
                 if self.get_state() not in [PyTango.DevState.UNKNOWN]:
                     with self.attr_lock:
+                        self.info_stream(
+                            'From write_channel: Setting channel' + str(cmd.data[0]) + " to " + str(cmd.data[1]) + " V")
                         self.AD5370_dac_device.write_value_volt(cmd.data[0], cmd.data[1], self.apply_immediate)
 
         except Queue.Empty:
@@ -342,8 +356,7 @@ class AD5370DacDS(PyTango.Device_4Impl):
             self.command_queue.put(cmd_msg)
 
     def is_channel_allowed(self, req_type):
-        if self.get_state() in [PyTango.DevState.INIT,
-                                PyTango.DevState.UNKNOWN]:
+        if self.get_state() in [PyTango.DevState.UNKNOWN]:
             #     End of Generated Code
             #     Re-Start of Generated Code
             return False
