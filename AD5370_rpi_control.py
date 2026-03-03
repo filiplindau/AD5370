@@ -108,6 +108,12 @@ class AD5370_control(object):
             time.sleep(0.001)
             gpio.output(self.LDAC_pin, 1)
 
+    def set_vref(self, value):
+        self.V_ref = value
+        for i, v in enumerate(self.voltages):
+            self.write_value_volt(i, v, immediate=False)
+        self.load_dac()
+
     def write_value_int(self, output, value, immediate=True):
         """
         Write DAC value to specific output pin
