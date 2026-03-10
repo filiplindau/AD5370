@@ -240,7 +240,7 @@ class AD5370DacDS(PyTango.Device_4Impl):
 
                 for channel in range(40):
                     with self.attr_lock:
-                        value = self.AD5370_dac_device.voltages[channel]
+                        value = self.AD5370_dac_device.input_codes[channel]
                         self.AD5370_dac_device.write_value_volt(channel, value, self.apply_immediate)
                     s = ''.join(('Channel ', str(channel), ': ', str(value)))
                     self.debug_stream(s)
@@ -301,7 +301,7 @@ class AD5370DacDS(PyTango.Device_4Impl):
                 if self.get_state() not in [PyTango.DevState.UNKNOWN]:
                     with self.attr_lock:
                         for ch in range(40):
-                            self.AD5370_dac_device.write_value_volt(ch, self.AD5370_dac_device.voltages[ch], False)
+                            self.AD5370_dac_device.write_value_volt(ch, self.AD5370_dac_device.input_codes[ch], False)
                         self.AD5370_dac_device.load_dac()
 
             elif cmd.command == 'write_apply_immediate':
@@ -340,7 +340,7 @@ class AD5370DacDS(PyTango.Device_4Impl):
             self.info_stream(''.join(('Reading channel for ', attr.get_name())))
         ch = int(attr.get_name().rsplit('channel')[1])
         with self.attr_lock:
-            attr_read = self.AD5370_dac_device.voltages[ch]
+            attr_read = self.AD5370_dac_device.input_codes[ch]
             if attr_read is None:
                 attr.set_quality(PyTango.AttrQuality.ATTR_INVALID)
                 attr_read = 0.0

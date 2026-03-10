@@ -54,15 +54,39 @@ class AD5370DacDS(Device):
                                         default_value=5.0)
 
     # --------- Device attributes --------------------------
-    apply_immediate = attribute(label="Trigger mode",
-                             dtype=bool,
-                             access=PyTango.AttrWriteType.READ_WRITE,
-                             unit="",
-                             fget="get_apply_immediate",
-                             fset="set_apply_immediate",
-                             doc="Determines if written dac values are applied immediately or if APPLY command is needed",
-                             memorized=True,
-                             )
+    # Additional attributes will be created dynamically.
+    #
+    apply_immediate = attribute(label="apply immediate",
+                                dtype=bool,
+                                access=PyTango.AttrWriteType.READ_WRITE,
+                                unit="",
+                                fget="get_apply_immediate",
+                                fset="set_apply_immediate",
+                                fisallowed="is_apply_immediate_allowed",
+                                doc="Determines if written dac values are applied immediately or if APPLY command is needed",
+                                memorized=True,
+                                )
+
+    v_min = attribute(label="v_min",
+                      dtype=(float, ),
+                      max_dim_x=40,
+                      access=PyTango.AttrWriteType.READ,
+                      unit="V",
+                      fget="get_vmin",
+                      fisallowed="is_vmin_allowed",
+                      doc="Minimum voltage with current settings",
+                      )
+
+    v_max = attribute(label="v_max",
+                      dtype=(float, ),
+                      max_dim_x=40,
+                      access=PyTango.AttrWriteType.READ,
+                      unit="V",
+                      fget="get_vmax",
+                      fisallowed="is_vmax_allowed",
+                      doc="Maximum voltage with current settings",
+                      )
+
 
     # ------------------------------------------------------------------
     #     Device constructor
@@ -75,7 +99,7 @@ class AD5370DacDS(Device):
         self.command_queue = None
         self.state_handler_dict = None
         self.stop_state_thread_flag = None
-        self.AD5370_dac_device = None
+        self.AD5370_dac_device: ad.AD5370_control = None
         self._apply_immediate = False
 
         Device.__init__(self, cl, name)
@@ -123,7 +147,7 @@ class AD5370DacDS(Device):
                     self.info_stream(f"channel{str(ch)} already defined.")
                 except PyTango.DevFailed:
                     # The attribute was not defined, so add it
-                    self.info_stream(f"channel{str(ch)} not defined, adding attribute")
+                    self.info_stream(f"channel{str(ch)} not defined, adding attributes")
                     attr_name = f"channel{str(ch)}"
                     attr = attribute(
                         name=attr_name,
@@ -132,10 +156,23 @@ class AD5370DacDS(Device):
                         fget=self.read_channel,
                         fset=self.write_channel,
                         fisallowed=self.is_channel_allowed,
-                        doc="DAC output for channel",
+                        doc="DAC output voltage for channel",
                         unit="V",
                         memorized=True)
                     self.add_attribute(attr)
+
+                    attr_name = f"channel{str(ch)}_raw"
+                    attr = attribute(
+                        name=attr_name,
+                        dtype=int,
+                        access=PyTango.READ,
+                        fget=self.read_channel_raw,
+                        fisallowed=self.is_channel_allowed,
+                        doc="DAC raw output for channel",
+                        unit="counts",
+                        display_level=PyTango.DispLevel.EXPERT)
+                    self.add_attribute(attr)
+
                     attr_name = f"gain{str(ch)}"
                     attr = attribute(
                         name=attr_name,
@@ -148,6 +185,19 @@ class AD5370DacDS(Device):
                         unit="",
                         memorized=True)
                     self.add_attribute(attr)
+
+                    attr_name = f"gain{str(ch)}_raw"
+                    attr = attribute(
+                        name=attr_name,
+                        dtype=int,
+                        access=PyTango.READ,
+                        fget=self.read_gain_raw,
+                        fisallowed=self.is_gain_allowed,
+                        doc="DAC raw gain for channel",
+                        unit="counts",
+                        display_level=PyTango.DispLevel.EXPERT)
+                    self.add_attribute(attr)
+
                     attr_name = f"offset{str(ch)}"
                     attr = attribute(
                         name=attr_name,
@@ -159,6 +209,18 @@ class AD5370DacDS(Device):
                         doc="DAC offset for channel",
                         unit="V",
                         memorized=True)
+                    self.add_attribute(attr)
+
+                    attr_name = f"offset{str(ch)}_raw"
+                    attr = attribute(
+                        name=attr_name,
+                        dtype=int,
+                        access=PyTango.READ,
+                        fget=self.read_offset_raw,
+                        fisallowed=self.is_offset_allowed,
+                        doc="DAC raw offset for channel",
+                        unit="counts",
+                        display_level=PyTango.DispLevel.EXPERT)
                     self.add_attribute(attr)
 
         except Exception as ex:
@@ -290,7 +352,7 @@ class AD5370DacDS(Device):
 
                 for channel in range(40):
                     with self.attr_lock:
-                        value = self.AD5370_dac_device.voltages[channel]
+                        value = self.AD5370_dac_device.get_output_volt(channel)
                         self.AD5370_dac_device.write_value_volt(channel, value, self._apply_immediate)
                     s = ''.join(('Channel ', str(channel), ': ', str(value)))
                     self.debug_stream(s)
@@ -363,8 +425,6 @@ class AD5370DacDS(Device):
             elif cmd.command == 'apply':
                 if self.get_state() not in [PyTango.DevState.UNKNOWN]:
                     with self.attr_lock:
-                        for ch in range(40):
-                            self.AD5370_dac_device.write_value_volt(ch, self.AD5370_dac_device.voltages[ch], False)
                         self.AD5370_dac_device.load_dac()
 
             elif cmd.command == 'write_apply_immediate':
@@ -382,7 +442,30 @@ class AD5370DacDS(Device):
                     with self.attr_lock:
                         self.info_stream(
                             'From write_channel: Setting channel' + str(cmd.data[0]) + " to " + str(cmd.data[1]) + " V")
-                        self.AD5370_dac_device.write_value_volt(cmd.data[0], cmd.data[1], self._apply_immediate)
+                        try:
+                            self.AD5370_dac_device.write_value_volt(cmd.data[0], cmd.data[1], self._apply_immediate)
+                        except ValueError as e:
+                            self.error_stream(f"Error writing channel {cmd.data[0]} to {cmd.data[1]}: \n{e}")
+
+            elif cmd.command == 'write_gain':
+                if self.get_state() not in [PyTango.DevState.UNKNOWN]:
+                    with self.attr_lock:
+                        self.info_stream(
+                            'From write_gain: Setting gain' + str(cmd.data[0]) + " to " + str(cmd.data[1]) + " V")
+                        try:
+                            self.AD5370_dac_device.write_gain_factor(cmd.data[0], cmd.data[1], self._apply_immediate)
+                        except ValueError as e:
+                            self.error_stream(f"Error writing channel {cmd.data[0]} to {cmd.data[1]}: \n{e}")
+
+            elif cmd.command == 'write_offset':
+                if self.get_state() not in [PyTango.DevState.UNKNOWN]:
+                    with self.attr_lock:
+                        self.info_stream(
+                            'From write_offset: Setting offset' + str(cmd.data[0]) + " to " + str(cmd.data[1]) + " V")
+                        try:
+                            self.AD5370_dac_device.write_offset_volt(cmd.data[0], cmd.data[1], self._apply_immediate)
+                        except ValueError as e:
+                            self.error_stream(f"Error writing channel {cmd.data[0]} to {cmd.data[1]}: \n{e}")
 
         except queue.Empty:
             # with self.streamLock:
@@ -403,7 +486,7 @@ class AD5370DacDS(Device):
             self.info_stream(''.join(('Reading channel for ', attr.get_name())))
         ch = int(attr.get_name().rsplit('channel')[1])
         with self.attr_lock:
-            value = self.AD5370_dac_device.voltages[ch]
+            value = self.AD5370_dac_device.get_output_volt(ch)
             if value is None:
                 attr.set_quality(PyTango.AttrQuality.ATTR_INVALID)
                 value = 0.0
@@ -417,6 +500,17 @@ class AD5370DacDS(Device):
             self.info_stream(''.join(('Setting channel ', str(ch), ' to ', str(data))))
             cmd_msg = Command('write_channel', [ch, data])
             self.command_queue.put(cmd_msg)
+
+    def read_channel_raw(self, attr):
+        with self.stream_lock:
+            self.info_stream(''.join(('Reading raw channel for ', attr.get_name())))
+        ch = int(attr.get_name().rsplit('channel')[1][:-4])
+        with self.attr_lock:
+            value = self.AD5370_dac_device.get_output_int(ch)
+            if value is None:
+                attr.set_quality(PyTango.AttrQuality.ATTR_INVALID)
+                value = 0
+        return value
 
     def is_channel_allowed(self, req_type):
         if self.get_state() in [PyTango.DevState.UNKNOWN]:
@@ -433,7 +527,7 @@ class AD5370DacDS(Device):
             self.info_stream(''.join(('Reading gain for ', attr.get_name())))
         ch = int(attr.get_name().rsplit('gain')[1])
         with self.attr_lock:
-            value = self.AD5370_dac_device.gains[ch]
+            value = self.AD5370_dac_device.get_gain_factor(ch)
             if value is None:
                 attr.set_quality(PyTango.AttrQuality.ATTR_INVALID)
                 value = 1.0
@@ -447,6 +541,17 @@ class AD5370DacDS(Device):
             self.info_stream(''.join(('Setting gain ', str(ch), ' to ', str(data))))
             cmd_msg = Command('write_gain', [ch, data])
             self.command_queue.put(cmd_msg)
+
+    def read_gain_raw(self, attr):
+        with self.stream_lock:
+            self.info_stream(''.join(('Reading raw gain for ', attr.get_name())))
+        ch = int(attr.get_name().rsplit('gain')[1][:-4])
+        with self.attr_lock:
+            value = self.AD5370_dac_device.get_gain_int(ch)
+            if value is None:
+                attr.set_quality(PyTango.AttrQuality.ATTR_INVALID)
+                value = 65535
+        return value
 
     def is_gain_allowed(self, req_type):
         if self.get_state() in [PyTango.DevState.UNKNOWN]:
@@ -463,7 +568,7 @@ class AD5370DacDS(Device):
             self.info_stream(''.join(('Reading offset for ', attr.get_name())))
         ch = int(attr.get_name().rsplit('offset')[1])
         with self.attr_lock:
-            value = self.AD5370_dac_device.offsets[ch]
+            value = self.AD5370_dac_device.get_offset_volt(ch)
             if value is None:
                 attr.set_quality(PyTango.AttrQuality.ATTR_INVALID)
                 value = 1.0
@@ -477,6 +582,17 @@ class AD5370DacDS(Device):
             self.info_stream(''.join(('Setting offset ', str(ch), ' to ', str(data))))
             cmd_msg = Command('write_offset', [ch, data])
             self.command_queue.put(cmd_msg)
+
+    def read_offset_raw(self, attr):
+        with self.stream_lock:
+            self.info_stream(''.join(('Reading raw offset for ', attr.get_name())))
+        ch = int(attr.get_name().rsplit('offset')[1][:-4])
+        with self.attr_lock:
+            value = self.AD5370_dac_device.get_offset_dac(ch)
+            if value is None:
+                attr.set_quality(PyTango.AttrQuality.ATTR_INVALID)
+                value = 0
+        return value
 
     def is_offset_allowed(self, req_type):
         if self.get_state() in [PyTango.DevState.UNKNOWN]:
@@ -498,7 +614,7 @@ class AD5370DacDS(Device):
                 attr_read = False
             else:
                 q = PyTango.AttrQuality.ATTR_VALID
-        return attr_read, q
+        return attr_read, time.time(), q
 
     def set_apply_immediate(self, value):
         self.info_stream(''.join(('Writing apply immediate')))
@@ -515,6 +631,47 @@ class AD5370DacDS(Device):
             return False
         return True
 
+    # ------------------------------------------------------------------
+    #     vmin attribute
+    # ------------------------------------------------------------------
+    def get_vmin(self):
+        with self.attr_lock:
+            attr_read = np.array(self.AD5370_dac_device.V_min)
+            self.info_stream(f"Reading vmin: {attr_read}")
+            if attr_read is None:
+                q = PyTango.AttrQuality.ATTR_INVALID
+                attr_read = False
+            else:
+                q = PyTango.AttrQuality.ATTR_VALID
+        return attr_read, time.time(), q
+
+    def is_vmin_allowed(self, req_type):
+        if self.get_state() in [PyTango.DevState.UNKNOWN]:
+            #     End of Generated Code
+            #     Re-Start of Generated Code
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    #     vmax attribute
+    # ------------------------------------------------------------------
+    def get_vmax(self):
+        with self.attr_lock:
+            attr_read = np.array(self.AD5370_dac_device.V_max)
+            self.info_stream(f"Reading vmax: {attr_read}")
+            if attr_read is None:
+                q = PyTango.AttrQuality.ATTR_INVALID
+                attr_read = False
+            else:
+                q = PyTango.AttrQuality.ATTR_VALID
+        return attr_read, time.time(), q
+
+    def is_vmax_allowed(self, req_type):
+        if self.get_state() in [PyTango.DevState.UNKNOWN]:
+            #     End of Generated Code
+            #     Re-Start of Generated Code
+            return False
+        return True
 # ==================================================================
 #
 #     AD5370DacDS command methods
