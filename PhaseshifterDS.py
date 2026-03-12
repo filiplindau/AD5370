@@ -5,6 +5,7 @@ from PyTango.server import attribute
 from PyTango.server import device_property
 from scipy.interpolate import interp1d
 import numpy as np
+import io
 
 class PhaseshifterDS(Device):
     __metaclass__ = DeviceMeta
@@ -22,6 +23,17 @@ class PhaseshifterDS(Device):
                       memorized=True,
                       hw_memorized=True)
 
+    voltage = attribute(label="Voltage",
+                      dtype=float,
+                      access=pt.AttrWriteType.READ,
+                      unit="V",
+                      format="3.2f",
+                      min_value=0.0,
+                      max_value=100.0,
+                      fget="get_voltage",
+                      doc="DAC voltage setting",
+                        display_level=pt.DispLevel.EXPERT)
+
     dac_ds_name = device_property(dtype=str,
                                   doc="Name of the underlying AD5370 DAC device server")
     phase_volt_cal = device_property(dtype=float,
@@ -31,24 +43,39 @@ class PhaseshifterDS(Device):
                                   doc="Channel connected to the phase shifter",
                                   default_value=39)
     phase_calibration_data = device_property(dtype=str,
-                                             doc="Calibration phase data vector")
+                                             doc="Calibration phase data vector, comma separated")
     voltage_calibration_data = device_property(dtype=str,
-                                               doc="Calibration voltage data vector")
+                                               doc="Calibration voltage data vector, comma separated")
+
+    wrap_around_extrapolation = device_property(dtype=bool,
+                                                doc="If true, phase settings wraps around to mod(360) outside calibration data allowing higher numerical phase values be used for scanning etc.")
+
+    def __init__(self, cl, name):
+        self.voltage_val = None
+        self.u = None
+        self.ph = None
+        self.ph_interp = None
+        self.phase_val = None
+        self.dac_dev = None
+        Device.__init__(self, cl, name)
 
     def init_device(self):
         self.debug_stream("In init_device:")
         Device.init_device(self)
         try:
-            self.u = np.array(self.voltage_calibration_data.split(",")).astype(np.double)
-            self.debug_stream("Voltage calibration data: {0}, length {1}".format(self.u, len(self.u)))
-            self.ph = np.array(self.phase_calibration_data.split(",")).astype(np.double)
-            self.debug_stream("Phase calibration data: {0}, length {1}".format(self.ph, len(self.ph)))
+            #self.u = np.array(self.voltage_calibration_data.split(",")).astype(np.double)
+            self.info_stream(f"voltage_calibration_data:\n{self.voltage_calibration_data}\n{type(self.voltage_calibration_data)}")
+            self.u = np.genfromtxt(io.StringIO(self.voltage_calibration_data), delimiter=",").astype(np.double)
+            self.info_stream("Voltage calibration data: {0}, length {1}".format(self.u, len(self.u)))
+            #self.ph = np.array(self.phase_calibration_data.split(",")).astype(np.double)
+            self.ph = np.genfromtxt(io.StringIO(self.phase_calibration_data), delimiter=",").astype(np.double)
+            self.info_stream("Phase calibration data: {0}, length {1}".format(self.ph, len(self.ph)))
             if len(self.u) != len(self.ph):
                 raise ValueError("Wrong dimension")
             self.condition_calibration_data()
             self.ph_interp = interp1d(self.ph, self.u)
-        except:
-            self.error_stream("Wrong dimension of calibration data, using stock")
+        except Exception as e:
+            self.error_stream(f"Wrong dimension of calibration data, using stock: \n {e}")
             self.u = np.array(
                 [0, 0.25, 0.5, 0.75, 1., 1.25, 1.5, 1.75, 2., 2.25, 2.5, 2.75, 3., 3.25, 3.5, 3.75, 4., 4.25,
                  4.5, 4.75, 5., 5.25, 5.5, 5.75, 6., 6.25, 6.5, 6.75, 7., 7.25, 7.5, 7.75, 8., 8.25, 8.5,
@@ -63,8 +90,9 @@ class PhaseshifterDS(Device):
         self.set_state(pt.DevState.ON)
 
     def condition_calibration_data(self):
-        ph0 = self.ph[0]
-        dph = self.ph - ph0
+        ind_sorted = np.argsort(self.ph)
+        ph0 = self.ph[ind_sorted][0]
+        dph = self.ph[ind_sorted] - ph0
         add_ph = [0.0]
         for i in range(len(dph) - 1):
             new_ph = add_ph[-1]
@@ -74,6 +102,7 @@ class PhaseshifterDS(Device):
         add_ph = np.array(add_ph)
         c_ph = add_ph + dph
         self.ph = c_ph
+        self.u = self.u[ind_sorted]
 
     def get_phase(self):
         self.debug_stream("In get_phase:")
@@ -85,10 +114,17 @@ class PhaseshifterDS(Device):
         if new_phase < 0.0:
             new_phase = 360 + new_phase
         if new_phase > max(self.ph):
-            new_phase = new_phase % 360.0
+            if self.wrap_around_extrapolation:
+                new_phase = new_phase % 360.0
+            else:
+                new_phase = max(self.ph)
         self.phase_val = new_phase
         new_voltage = self.ph_interp(new_phase)
+        self.voltage_val = new_voltage
         self.dac_dev.write_attribute("".join(("channel", str(self.dac_channel))), new_voltage)
+
+    def get_voltage(self):
+        return self.voltage_val
 
 
 if __name__ == "__main__":

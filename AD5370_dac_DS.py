@@ -67,6 +67,19 @@ class AD5370DacDS(Device):
                                 memorized=True,
                                 )
 
+    offset_code = attribute(label="offset code",
+                                dtype=int,
+                                access=PyTango.AttrWriteType.READ_WRITE,
+                                unit="",
+                            max_value=16383,
+                            min_value=0,
+                                fget="get_offset_code",
+                                fset="set_offset_code",
+                                fisallowed="is_offset_code_allowed",
+                                doc="DAC offset value that is common to all channels",
+                                memorized=True,
+                                )
+
     v_min = attribute(label="v_min",
                       dtype=(float, ),
                       max_dim_x=40,
@@ -279,7 +292,7 @@ class AD5370DacDS(Device):
             try:
                 with self.stream_lock:
                     self.info_stream(''.join(('Opening AD5370_dac device on port ', str(self.spi_port))))
-                self.AD5370_dac_device = ad.AD5370_control(self.spi_port, self.spi_device)
+                self.AD5370_dac_device = ad.AD5370_control(self.spi_port, self.spi_device, self.voltage_reference)
             except Exception as ex:
                 with self.stream_lock:
                     self.error_stream(''.join(('Could not connect to AD5370_dac on address ', str(self.spi_port))))
@@ -306,12 +319,36 @@ class AD5370DacDS(Device):
                 self.set_state(PyTango.DevState.UNKNOWN)
                 break
 
+            # Set channels to memorized values
+            attrs = self.get_device_attr()
+            self.AD5370_dac_device.reset()
+            attr = attrs.get_attr_by_name(f"offset_code")
+            self.AD5370_dac_device.write_offset_code(attr.get_write_value(), False)
+            self.AD5370_dac_device.clear(True)
+            for ch in range(40):
+                try:
+                    attr = attrs.get_attr_by_name(f"channel{str(ch)}")
+                    self.AD5370_dac_device.write_value_volt(ch, attr.get_write_value(), False)
+                    time.sleep(0.05)
+                    attr = attrs.get_attr_by_name(f"gain{str(ch)}")
+                    self.AD5370_dac_device.write_gain_factor(ch, attr.get_write_value(), False)
+                    time.sleep(0.05)
+                    attr = attrs.get_attr_by_name(f"offset{str(ch)}")
+                    self.AD5370_dac_device.write_offset_volt(ch, attr.get_write_value(), False)
+                    time.sleep(0.05)
+                    self.set_status(f"Initializing device\n... ch{ch+1}/40")
+                except ValueError as e:
+                    self.error_stream(f"Error setting channel {ch}: {e}")
+                    break
+            self.AD5370_dac_device.load_dac()
+
             self.check_commands(block_time=wait_time)
             if self.command_queue.empty:
-                self.set_state(PyTango.DevState.ON)
+                self.set_state(PyTango.DevState.OFF)
                 break
             else:
                 retries -= 1
+
 
     def on_handler(self, prev_state):
         """Handles the ON state. Connected to the AD5370_dac.
@@ -466,6 +503,15 @@ class AD5370DacDS(Device):
                             self.AD5370_dac_device.write_offset_volt(cmd.data[0], cmd.data[1], self._apply_immediate)
                         except ValueError as e:
                             self.error_stream(f"Error writing channel {cmd.data[0]} to {cmd.data[1]}: \n{e}")
+
+            elif cmd.command == 'write_offset_code':
+                if self.get_state() not in [PyTango.DevState.UNKNOWN]:
+                    with self.attr_lock:
+                        self.info_stream(f"From write_offset_code: Setting offset_code to {str(cmd.data)}")
+                        try:
+                            self.AD5370_dac_device.write_offset_code(cmd.data, self._apply_immediate)
+                        except ValueError as e:
+                            self.error_stream(f"Error writing offset_code {cmd.data}: \n{e}")
 
         except queue.Empty:
             # with self.streamLock:
@@ -626,6 +672,36 @@ class AD5370DacDS(Device):
 
     def is_apply_immediate_allowed(self, req_type):
         if self.get_state() in []:
+            #     End of Generated Code
+            #     Re-Start of Generated Code
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    #     offset_code attribute
+    # ------------------------------------------------------------------
+    def get_offset_code(self):
+        with self.stream_lock:
+            self.info_stream(''.join(('Reading offset_code')))
+        with self.attr_lock:
+            attr_read = self.AD5370_dac_device.get_offset_code_int()
+            if attr_read is None:
+                q = PyTango.AttrQuality.ATTR_INVALID
+                attr_read = False
+            else:
+                q = PyTango.AttrQuality.ATTR_VALID
+        return attr_read, time.time(), q
+
+    def set_offset_code(self, value):
+        self.info_stream(''.join(('Writing offset_code')))
+        with self.attr_lock:
+            data = value
+            self.info_stream(''.join(('Setting offset_code to ', str(data))))
+            cmd_msg = Command('write_offset_code', data)
+            self.command_queue.put(cmd_msg)
+
+    def is_offset_code_allowed(self, req_type):
+        if self.get_state() in [PyTango.DevState.UNKNOWN]:
             #     End of Generated Code
             #     Re-Start of Generated Code
             return False

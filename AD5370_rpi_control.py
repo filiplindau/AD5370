@@ -16,8 +16,8 @@ logger = logging.getLogger()
 
 
 class AD5370_control(object):
-    def __init__(self, port=0, device=0):
-        self.V_ref = 5.00
+    def __init__(self, port=0, device=0, V_ref=5.00):
+        self.V_ref = V_ref
         self.offset_code = 0x1555       # Global offset dac value
         self.offsets = []
         self.gains = []
@@ -66,6 +66,9 @@ class AD5370_control(object):
         self.spi = spidev.SpiDev()
         self.spi.open(self.spi_port, self.spi_device)
         self.spi.mode = 0b01        # Something something polarity clock
+        # self.spi.max_speed_hz = 10000
+        self.spi.bits_per_word = 8
+        self.lsbfirst = False
 
     def close(self):
         self.spi.close()
@@ -136,7 +139,7 @@ class AD5370_control(object):
             raise TypeError('Value must be integer')
         if value < 0 or value > 65535:
             raise ValueError('Value must be in range 0-65535')
-        gr = channel / 8     # Group number
+        gr = channel // 8     # Group number
         ch = channel % 8     # Channel number
         a = int(8*(gr+1) + ch)
         self.input_codes[channel] = value
@@ -163,13 +166,13 @@ class AD5370_control(object):
             raise ValueError('Output must be in range 0-39')
         # if value < self.V_min[channel] or value > self.V_max[channel]:
         #     raise ValueError(''.join(('Value must be in range ', str(self.V_min[channel]), '-', str(self.V_max[channel]))))
-        dac_code = value * 2**16 / (4 * self.V_ref) + 4 * self.offset_code
-        input_code = int((dac_code - self.offsets[channel] + 2**15) * 2**16 / (self.gains[channel] + 1))
+        input_code = value * 2**16 / (4 * self.V_ref) + 4 * self.offset_code
+        dac_code = int((input_code - self.offsets[channel] + 2**15) * 2**16 / (self.gains[channel] + 1))
         logger.info(f"Channel {channel}:\n"
-                    f"    vout     = {value:.3f}\n"
-                    f"    dac_code = {dac_code}\n"
-                    f"    dac_value= {input_code}")
-        self.write_value_int(channel, int(dac_code), immediate=immediate)
+                    f"    vout       = {value:.3f}\n"
+                    f"    input_code = {input_code}\n"
+                    f"    dac_code   = {dac_code}")
+        self.write_value_int(channel, int(input_code), immediate=immediate)
 
     def get_output_volt(self, channel):
         dac_code = self.input_codes[channel] * (self.gains[channel] + 1) / 2**16 + self.offsets[channel] - 2**15
@@ -201,7 +204,7 @@ class AD5370_control(object):
             logger.exception(f"Offeset {channel}: {value}")
             raise ValueError('Value must be in range 0-65535')
         x = 0b10000000
-        gr = channel / 8  # Group number
+        gr = channel // 8  # Group number
         ch = channel % 8  # Channel number
         a = int(8 * (gr + 1) + ch)
 
@@ -255,7 +258,7 @@ class AD5370_control(object):
         if value < 0 or value > 65535:
             raise ValueError('Value must be in range 0-65535')
         x = 0b01000000
-        gr = channel / 8  # Group number
+        gr = channel // 8  # Group number
         ch = channel % 8  # Channel number
         a = int(8 * (gr + 1) + ch)
 
@@ -276,6 +279,32 @@ class AD5370_control(object):
 
     def get_gain_int(self, channel):
         return self.gains[channel]
+
+    def write_offset_code(self, value, immediate=False):
+        """
+        Write DAC offset value that is common to all channels
+        to registers OFS0 and OFS1
+        :param value:  Value to write. 0-65535
+        :return:
+        """
+        if not isinstance(value, int):
+            raise TypeError('Value must be integer')
+        if value < 0 or value > 16383:
+            raise ValueError('Value must be in range 0-16383')
+        x = 0b0000_0010         # OFS0 register
+        d = struct.pack('<H', value)
+        write_list = [int(x), d[1], d[0]]
+        self.spi.xfer2(write_list)
+        x = 0b0000_0011         # OFS1 register
+        d = struct.pack('<H', value)
+        write_list = [int(x), d[1], d[0]]
+        self.spi.xfer2(write_list)
+        self.offset_code = value
+        if immediate is True:
+            self.load_dac()
+
+    def get_offset_code_int(self):
+        return self.offset_code
 
     def write_function(self, function, value):
         """
