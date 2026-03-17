@@ -35,13 +35,13 @@ class PhaseshifterDS(Device):
                         display_level=pt.DispLevel.EXPERT)
 
     dac_ds_name = device_property(dtype=str,
-                                  doc="Name of the underlying AD5370 DAC device server")
+                                  doc="Name of the underlying DAC / PS device server")
     phase_volt_cal = device_property(dtype=float,
                                      doc="Calibration factor in degrees/volt",
                                      default_value=36.0)
-    dac_channel = device_property(dtype=int,
-                                  doc="Channel connected to the phase shifter",
-                                  default_value=39)
+    dac_attribute = device_property(dtype=str,
+                                  doc="Attribute name controlling the phase shifter",
+                                  default_value="channel0")
     phase_calibration_data = device_property(dtype=str,
                                              doc="Calibration phase data vector, comma separated")
     voltage_calibration_data = device_property(dtype=str,
@@ -121,7 +121,7 @@ class PhaseshifterDS(Device):
         self.phase_val = new_phase
         new_voltage = self.ph_interp(new_phase)
         self.voltage_val = new_voltage
-        self.dac_dev.write_attribute("".join(("channel", str(self.dac_channel))), new_voltage)
+        self.dac_dev.write_attribute(self.dac_attribute, new_voltage)
 
     def get_voltage(self):
         return self.voltage_val
